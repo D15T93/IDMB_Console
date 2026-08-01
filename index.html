@@ -2337,7 +2337,7 @@ let mem = null;
 function blankState(){
   return { onboarded:false, theme:"", callsign:"", firstRun:"", unlocked:{}, unlockedCs:{}, launched:false, game:{name:"",launch:"",target:7000}, xp:0,
     tasksDone:{}, wishlist:[], quests:{week:"",done:{}}, streak:0, lastWeekComplete:"",
-    worksheet:{positioning:"",comps:[]}, outreach:[], countdown:{}, achievements:{}, xpGranted:{}, orMax:0, festivals:[], fMax:0, lastBackup:"", presskit:{}, pagescore:{}, mentalVisits:0, seenLevel:1, view:"home" };
+    worksheet:{positioning:"",comps:[]}, outreach:[], countdown:{}, achievements:{}, xpGranted:{}, orMax:0, festivals:[], fMax:0, lastBackup:"", presskit:{}, pagescore:{}, platform:{steamAppId:""}, mentalVisits:0, seenLevel:1, view:"home" };
 }
 function migrate(s){
   // mark already-completed items as granted so they can't be re-farmed (covers old saves and imports)
@@ -2359,6 +2359,7 @@ function migrate(s){
   if(typeof s.lastBackup!=="string") s.lastBackup="";
   if(!s.presskit || typeof s.presskit!=="object") s.presskit={};
   if(!s.pagescore || typeof s.pagescore!=="object") s.pagescore={};
+  if(!s.platform || typeof s.platform!=="object") s.platform={steamAppId:""};
   if(s.outreach){ for(const o of s.outreach){ if(o.covered && o.covXP===undefined) o.covXP=true; } }
   return s;
 }
@@ -2613,6 +2614,7 @@ const ICONS={
   festival:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4h13l-2.5 4L18 12H5"/></svg>',
   presskit:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10v4h3l8 5V5l-8 5H3z"/><path d="M18 9a4.2 4.2 0 0 1 0 6"/></svg>',
   pagescore:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l2-5h14l2 5"/><rect x="4" y="9" width="16" height="11" rx="1"/><path d="M9 20v-6h6v6"/></svg>',
+  platform:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
 };
 const NAV=[
   {id:"home", ic:"🎯", label:"Home"},
@@ -2637,7 +2639,7 @@ function render(){
   document.body.dataset.theme=state.theme||"";
   if(!state.onboarded){ return renderOnboard(); }
   const v=state.view||"campaign";
-  const map={home:viewHome,campaign:viewCampaign,section:viewSection,rank:viewRank,quests:viewQuests,toolkit:viewToolkit,worksheets:viewWorksheets,outreach:viewOutreach,festivals:viewFestivals,countdown:viewCountdown,presskit:viewPressKit,pagescore:viewPageScore,bible:viewBible,ideas:viewIdeas,benchmarks:viewBenchmarks,achievements:viewAchievements,mental:viewMental};
+  const map={home:viewHome,campaign:viewCampaign,section:viewSection,rank:viewRank,quests:viewQuests,toolkit:viewToolkit,worksheets:viewWorksheets,outreach:viewOutreach,festivals:viewFestivals,countdown:viewCountdown,presskit:viewPressKit,pagescore:viewPageScore,platform:viewPlatform,bible:viewBible,ideas:viewIdeas,benchmarks:viewBenchmarks,achievements:viewAchievements,mental:viewMental};
   (map[v]||viewHome)();
   window.scrollTo({top:0,behavior:"instant"});
 }
@@ -3095,11 +3097,120 @@ function viewBible(){
   window.scrollTo(0,0);
 }
 
+
+/* ============ PLATFORM STATS ============ */
+// Relay endpoint. The browser cannot call itch.io or Steam directly (cross-origin),
+// so requests go via the Worker. Your itch key is kept in its own storage slot and
+// is deliberately NOT part of your save file, so exporting a save never leaks it.
+const STATS_ENDPOINT="https://console-licence.gazer-07.workers.dev";
+const ITCH_KEY_STORE="idmb_itch_key";
+function getItchKey(){ try{ return localStorage.getItem(ITCH_KEY_STORE)||""; }catch(e){ return ""; } }
+function setItchKey(v){ try{ if(v){ localStorage.setItem(ITCH_KEY_STORE,v); } else { localStorage.removeItem(ITCH_KEY_STORE); } }catch(e){} }
+let statsState={itch:null,steam:null,busy:"",err:""};
+
+async function callStats(route, payload){
+  const res=await fetch(STATS_ENDPOINT+route,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+  return await res.json();
+}
+async function pullItch(){
+  const key=getItchKey();
+  if(!key){ statsState.err="Add your itch.io API key first."; viewPlatform(); return; }
+  statsState.busy="itch"; statsState.err=""; viewPlatform();
+  try{
+    const d=await callStats("/itch",{key:key});
+    if(d.ok){ statsState.itch=d.games||[]; }
+    else{ statsState.err=d.msg||"Couldn't fetch your itch data."; }
+  }catch(e){ statsState.err="Couldn't reach the stats service. Check your connection."; }
+  statsState.busy=""; viewPlatform();
+}
+async function pullSteam(){
+  const id=(state.platform.steamAppId||"").replace(/\D/g,"");
+  if(!id){ statsState.err="Add your Steam App ID first."; viewPlatform(); return; }
+  statsState.busy="steam"; statsState.err=""; viewPlatform();
+  try{
+    const d=await callStats("/steam",{appid:id});
+    if(d.ok){ statsState.steam=d; }
+    else{ statsState.err=d.msg||"Couldn't fetch Steam data."; }
+  }catch(e){ statsState.err="Couldn't reach the stats service. Check your connection."; }
+  statsState.busy=""; viewPlatform();
+}
+
+function viewPlatform(){
+  const key=getItchKey();
+  const it=statsState.itch, st=statsState.steam;
+
+  const itchRows = it && it.length
+    ? '<table class="log"><thead><tr><th>Project</th><th>Views</th><th>Downloads</th><th>Sales</th></tr></thead><tbody>'
+      + it.map(g=>'<tr><td>'+esc(g.title)+(g.published?'':' <span style="color:var(--faint);font-size:11px">(draft)</span>')
+        +'</td><td class="mono">'+g.views.toLocaleString()
+        +'</td><td class="mono">'+g.downloads.toLocaleString()
+        +'</td><td class="mono">'+g.purchases.toLocaleString()+'</td></tr>').join("")
+      + '</tbody></table>'
+    : (it ? '<p style="color:var(--faint);margin:0">No projects came back for that key.</p>' : '');
+
+  let steamBlock='';
+  if(st){
+    const r=st.reviews;
+    const pct = r && r.total ? Math.round(r.positive/r.total*100) : null;
+    steamBlock='<div class="statgrid" style="grid-template-columns:repeat(3,1fr);margin-top:14px">'
+      +'<div class="stat"><div class="n">'+(r?r.total.toLocaleString():"—")+'</div><div class="l">Reviews</div></div>'
+      +'<div class="stat"><div class="n" style="color:var(--teal)">'+(pct===null?"—":pct+"%")+'</div><div class="l">Positive</div></div>'
+      +'<div class="stat"><div class="n">'+(typeof st.players==="number"?st.players.toLocaleString():"—")+'</div><div class="l">Playing now</div></div>'
+      +'</div>'
+      +(st.name?'<p style="color:var(--muted);font-size:13px;margin-top:10px">'+esc(st.name)+(st.comingSoon?' · unreleased, so review and player counts stay empty until launch':'')+(r&&r.desc?' · '+esc(r.desc):'')+'</p>':'');
+  }
+
+  document.getElementById("main").innerHTML=
+   '<div class="view">'
+   +'<button class="btn ghost" data-nav="toolkit" style="margin-bottom:16px">\u2190 Toolkit</button>'
+   +'<div class="eyebrow">Toolkit</div>'
+   +'<h2 class="title">Platform Stats</h2>'
+   +'<p class="lede">Pull your real numbers in rather than typing them. itch.io gives views, downloads and sales for your own projects. Steam gives public review and player data for any App ID.</p>'
+   +(statsState.err?'<div class="keyidea" style="border-color:rgba(var(--accent-rgb),.5)"><b>\u26a0 </b>'+esc(statsState.err)+'</div>':'')
+
+   +'<div class="panel"><h3>itch.io</h3>'
+     +'<label class="fld">Your itch.io API key</label>'
+     +'<input class="inp mono" id="itchKey" type="password" placeholder="'+(key?"\u2022".repeat(18):"paste your key")+'" style="margin-bottom:8px">'
+     +'<p style="color:var(--faint);font-size:12.5px;margin:0 0 12px">Generate one at itch.io \u2192 Settings \u2192 API keys. It is stored only on this device and is never included in your save export. Treat it like a password.</p>'
+     +'<div style="display:flex;gap:8px;flex-wrap:wrap">'
+       +'<button class="btn teal" id="itchSave">Save key</button>'
+       +'<button class="btn" id="itchPull">'+(statsState.busy==="itch"?"Fetching\u2026":"Fetch my itch stats")+'</button>'
+       +(key?'<button class="btn ghost" id="itchClear" style="font-size:13px">Remove key</button>':'')
+     +'</div>'
+     +(itchRows?'<div style="margin-top:14px;overflow-x:auto">'+itchRows+'</div>':'')
+   +'</div>'
+
+   +'<div class="panel"><h3>Steam</h3>'
+     +'<label class="fld">Your Steam App ID</label>'
+     +'<input class="inp mono" id="steamId" placeholder="e.g. 2379780" value="'+esc(state.platform.steamAppId||"")+'" style="margin-bottom:8px">'
+     +'<p style="color:var(--faint);font-size:12.5px;margin:0 0 12px">The number in your store page URL. No key needed, this is public data. Wishlist totals are not public, so keep logging those by hand in Wishlists.</p>'
+     +'<button class="btn" id="steamPull">'+(statsState.busy==="steam"?"Fetching\u2026":"Fetch Steam data")+'</button>'
+     +steamBlock
+   +'</div>'
+
+   +'<div class="keyidea"><b>Key idea \u00b7 </b>Numbers are feedback on a store page at a moment in time, never a verdict on you. Pull them weekly, learn what moved them, then close the tab.</div>'
+   +'</div>';
+
+  const sk=document.getElementById("itchSave");
+  if(sk) sk.onclick=()=>{
+    const v=document.getElementById("itchKey").value.trim();
+    if(!v){ toast("","Nothing to save","Paste your itch API key first."); return; }
+    setItchKey(v); toast("","Key saved","Stored on this device only."); viewPlatform();
+  };
+  const cl=document.getElementById("itchClear");
+  if(cl) cl.onclick=()=>{ setItchKey(""); statsState.itch=null; toast("","Key removed",""); viewPlatform(); };
+  const ip=document.getElementById("itchPull"); if(ip) ip.onclick=pullItch;
+  const si=document.getElementById("steamId");
+  if(si) si.oninput=()=>{ state.platform.steamAppId=si.value.replace(/\D/g,""); save(state); };
+  const sp=document.getElementById("steamPull"); if(sp) sp.onclick=pullSteam;
+}
+
 function viewToolkit(){
   const tools=[
     {v:"bible", ic:ICONS.book, n:"The Bible · read in app", d:"All 65 pages, every chapter one tap from its mission. Same book, always with you."},
     {v:"worksheets", ic:ICONS.sheets, n:"Worksheets", d:"Your positioning line and comparable games, saved as you type."},
     {v:"pagescore", ic:ICONS.pagescore, n:"Steam Page Scorecard", d:"Score your page against the checks that decide the first five seconds."},
+    {v:"platform", ic:ICONS.platform, n:"Platform Stats", d:"Pull your live itch.io numbers and public Steam data straight into the app."},
     {v:"outreach", ic:ICONS.outreach, n:"Outreach Tracker", d:"Who you pitched, when, and who covered you. Your creator and press CRM."},
     {v:"festivals", ic:ICONS.festival, n:"Festival Tracker", d:"Submissions, deadlines, results. Small festivals compound; Cairn entered eighteen."},
     {v:"countdown", ic:ICONS.countdown, n:"90-Day Countdown", d:"Your launch runway as dated milestones, generated from your launch date."},
